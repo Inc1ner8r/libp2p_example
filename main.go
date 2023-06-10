@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
 	"fmt"
 	"log"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"syscall"
 
 	"github.com/libp2p/go-libp2p"
+	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
 	ma "github.com/multiformats/go-multiaddr"
@@ -23,44 +25,53 @@ func masternode() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// start a libp2p node with default settings
-	node, err := libp2p.New(
-	// libp2p.ListenAddrStrings("/ip4/127.0.0.1/tcp/2000"),
-	)
+	ha, err := makeBasicHost()
 	if err != nil {
-		panic(err)
+		log.Fatal(err)
 	}
 
-	// print the node's listening addresses
-	fmt.Println("Listen addresses:", node.Addrs())
+	startListener(ctx, ha)
 
-	// node.SetStreamHandler("/echo/1.0.0", func(s network.Stream) {
-	// 	log.Println("listener received new stream")
-	// 	if err := doEcho(s); err != nil {
-	// 		log.Println(err)
-	// 		s.Reset()
-	// 	} else {
-	// 		s.Close()
-	// 	}
-	// })
-
-	// log.Println("listening for connections")
-
-	StartListener(ctx, node, 2000)
 	// wait for a SIGINT or SIGTERM signal
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
 	<-ch
 	fmt.Println("Received signal, shutting down...")
 
-	// shut the node down
-	if err := node.Close(); err != nil {
-		panic(err)
-	}
-
 }
 
-func StartListener(ctx context.Context, ha host.Host, listenPort int) {
+// makeBasicHost creates a LibP2P host with a random peer ID listening on the
+// given multiaddress. It won't encrypt the connection if insecure is true.
+func makeBasicHost() (host.Host, error) {
+	r := rand.Reader
+
+	// Generate a key pair for this host. We will use it at least
+	// to obtain a valid host ID.
+	priv, _, err := crypto.GenerateKeyPairWithReader(crypto.RSA, 2048, r)
+	if err != nil {
+		return nil, err
+	}
+
+	opts := []libp2p.Option{
+		libp2p.ListenAddrStrings("/ip4/127.0.0.1/tcp/9000"),
+		libp2p.Identity(priv),
+		libp2p.DisableRelay(),
+	}
+
+	return libp2p.New(opts...)
+}
+
+func getHostAddress(ha host.Host) string {
+	// Build host multiaddress
+	hostAddr, _ := ma.NewMultiaddr(fmt.Sprintf("/p2p/%s", ha.ID().Pretty()))
+
+	// Now we can build a full multiaddress to reach this host
+	// by encapsulating both addresses:
+	addr := ha.Addrs()[0]
+	return addr.Encapsulate(hostAddr).String()
+}
+
+func startListener(ctx context.Context, ha host.Host) {
 	fullAddr := getHostAddress(ha)
 	log.Printf("I am %s\n", fullAddr)
 
@@ -78,16 +89,6 @@ func StartListener(ctx context.Context, ha host.Host, listenPort int) {
 
 	log.Println("listening for connections")
 
-}
-
-func getHostAddress(ha host.Host) string {
-	// Build host multiaddress
-	hostAddr, _ := ma.NewMultiaddr("/p2p/12D3KooWMHwXLsXMKto6b5yGXjHe5sXtHcJd5We6gd2HWpxhVZQy")
-
-	// Now we can build a full multiaddress to reach this host
-	// by encapsulating both addresses:
-	addr := ha.Addrs()[0]
-	return addr.Encapsulate(hostAddr).String()
 }
 
 // doEcho reads a line of data a stream and writes it back
