@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"context"
-	"crypto/rand"
 	"fmt"
 	"log"
 	"os"
@@ -15,6 +14,7 @@ import (
 
 	"github.com/libp2p/go-libp2p"
 	dht "github.com/libp2p/go-libp2p-kad-dht"
+	pubsub "github.com/libp2p/go-libp2p-pubsub"
 	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
@@ -57,6 +57,50 @@ func masternode() {
 
 	startListener(ctx, ha)
 
+	// Create a new PubSub service using the GossipSub router.
+	ps, err := pubsub.NewGossipSub(context.TODO(), ha)
+	if err != nil {
+		panic(err)
+	}
+
+	// Join a PubSub topic.
+	topicString := "UniversalPeer" // Change "UniversalPeer" to whatever you want!
+	topic, err := ps.Join(DiscoveryServiceTag + "/" + topicString)
+	if err != nil {
+		panic(err)
+	}
+
+	if err := topic.Publish(context.TODO(), []byte("Hello world!")); err != nil {
+		panic(err)
+	}
+
+	// Publish the current date and time every 5 seconds.
+	go func() {
+		for {
+			err := topic.Publish(context.TODO(), []byte(fmt.Sprintf("The time is: %s", time.Now().Format(time.RFC3339))))
+			if err != nil {
+				panic(err)
+			}
+			time.Sleep(time.Second * 5)
+		}
+	}()
+
+	// Subscribe to the topic.
+	sub, err := topic.Subscribe()
+	if err != nil {
+		panic(err)
+	}
+
+	for {
+		// Block until we recieve a new message.
+		msg, err := sub.Next(context.TODO())
+		if err != nil {
+			panic(err)
+		}
+		fmt.Printf("[%s] %s", msg.ReceivedFrom, string(msg.Data))
+		fmt.Println()
+	}
+
 	// wait for a SIGINT or SIGTERM signal
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
@@ -68,19 +112,33 @@ func masternode() {
 // makeBasicHost creates a LibP2P host with a random peer ID listening on the
 // given multiaddress. It won't encrypt the connection if insecure is true.
 func makeBasicHost() (host.Host, error) {
-	r := rand.Reader
+	// r := rand.Reader
 
 	// Generate a key pair for this host. We will use it at least
 	// to obtain a valid host ID.
-	priv, _, err := crypto.GenerateKeyPairWithReader(crypto.RSA, 2048, r)
+	// priv, _, err := crypto.GenerateKeyPairWithReader(crypto.RSA, 2048, r)
+	// if err != nil {
+	// 	return nil, err
+	// }
+	privk, err := LoadIdentity("identity.key")
 	if err != nil {
-		return nil, err
+		panic(err)
+	}
+	opts := []libp2p.Option{
+		// libp2p.ListenAddrStrings("/ip4/127.0.0.1/tcp/9001"),
+		libp2p.Identity(privk),
+		libp2p.DisableRelay(),
 	}
 
-	opts := []libp2p.Option{
-		libp2p.ListenAddrStrings("/ip4/127.0.0.1/tcp/9001"),
-		libp2p.Identity(priv),
-		libp2p.DisableRelay(),
+	announceAddrs := []string{"/ip4/127.0.0.1/tcp/9001"} // Set to your external IP address for each transport you wish to use.
+	var announce []multiaddr.Multiaddr
+	if len(announceAddrs) > 0 {
+		for _, addr := range announceAddrs {
+			announce = append(announce, multiaddr.StringCast(addr))
+		}
+		opts = append(opts, libp2p.AddrsFactory(func([]multiaddr.Multiaddr) []multiaddr.Multiaddr {
+			return announce
+		}))
 	}
 
 	return libp2p.New(opts...)
@@ -217,5 +275,45 @@ func Discover(ctx context.Context, h host.Host, dht *dht.IpfsDHT, rendezvous str
 				}
 			}
 		}
+	}
+}
+
+// GenerateIdentity writes a new random private key to the given path.
+func GenerateIdentity(path string) (crypto.PrivKey, error) {
+	privk, _, err := crypto.GenerateKeyPair(crypto.Ed25519, 0)
+	if err != nil {
+		return nil, err
+	}
+
+	bytes, err := crypto.MarshalPrivateKey(privk)
+	if err != nil {
+		return nil, err
+	}
+
+	err = os.WriteFile(path, bytes, 0400)
+
+	return privk, err
+}
+
+// ReadIdentity reads a private key from the given path.
+func ReadIdentity(path string) (crypto.PrivKey, error) {
+	bytes, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	return crypto.UnmarshalPrivateKey(bytes)
+}
+
+// LoadIdentity reads a private key from the given path and, if it does not
+// exist, generates a new one.
+func LoadIdentity(path string) (crypto.PrivKey, error) {
+	if _, err := os.Stat(path); err == nil {
+		return ReadIdentity(path)
+	} else if os.IsNotExist(err) {
+		fmt.Printf("Generating peer identity in %s\n", path)
+		return GenerateIdentity(path)
+	} else {
+		return nil, err
 	}
 }
